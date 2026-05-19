@@ -2,121 +2,129 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import requests
+import re
 from apify_client import ApifyClient
+from datetime import datetime
 
-# -------------------------------------------------------------------
-# 🛑 PASTE YOUR API KEYS HERE 🛑
 # -------------------------------------------------------------------
 APIFY_API_TOKEN = st.secrets["APIFY_TOKEN"]
 SERPAPI_API_KEY = st.secrets["SERPAPI_KEY"]
 # -------------------------------------------------------------------
 
-st.set_page_config(page_title="Competitor Ad Intelligence", layout="wide")
-
-st.title("📊 Competitor Ad Intelligence Dashboard")
-st.markdown("Instantly pull, combine, and analyze ad strategies from Meta and Google.")
+st.set_page_config(page_title="EU Competitor Ad Intelligence (DSA)", layout="wide")
+st.title("🇪🇺 EU Competitor Ad Intelligence Dashboard")
+st.markdown("Extracting 1-year historical archives mandated under the EU Digital Services Act (DSA).")
 
 with st.form("input_form"):
     col1, col2 = st.columns(2)
     with col1:
-        meta_url = st.text_input("Meta Ad Library or FB Page URL", placeholder="https://www.facebook.com/competitor")
+        meta_url = st.text_input("Paste Full Meta Ad Library URL", placeholder="https://www.facebook.com/ads/library/?...")
     with col2:
-        google_domain = st.text_input("Google Ads Transparency Domain", placeholder="competitor.com")
-        
-    submit_button = st.form_submit_button(label="Generate Competitor Report")
+        google_url = st.text_input("Paste Full Google Transparency URL", placeholder="https://adstransparency.google.com/advertiser/AR...")
+    submit_button = st.form_submit_button(label="Generate 3-Month EU Report")
 
+# --- Improved Date Fixer for EU Timestamps ---
+def parse_eu_date(raw_date):
+    if not raw_date:
+        return "Unknown"
+    try:
+        # Check if it's a 10-digit Unix timestamp (seconds)
+        if len(str(int(float(raw_date)))) == 10:
+            return datetime.fromtimestamp(int(float(raw_date))).strftime('%Y-%m-%d')
+        # Check if it's a 13-digit Unix timestamp (milliseconds)
+        elif len(str(int(float(raw_date)))) == 13:
+            return datetime.fromtimestamp(int(float(raw_date)) / 1000).strftime('%Y-%m-%d')
+        return str(raw_date)[:10]
+    except:
+        return "Unknown"
 
 def get_meta_ads(url, token):
-    if not url or token == "YOUR_APIFY_TOKEN_HERE": 
-        return []
-        
+    if not url: return []
     client = ApifyClient(token)
-    run_input = {
-        "startUrls": [{"url": url}],
-        "resultsLimit": 15 # Keeping it low so it scrapes fast
-    }
     
-    # Triggers the Apify scraper
+    # Tells Apify to look for EU-specific DSA fields and historical ads
+    run_input = {"startUrls": [{"url": url}], "resultsLimit": 80}
     run = client.actor("apify/facebook-ads-scraper").call(run_input=run_input)
     
     ads = []
-    # Formats the data for Pandas
     for item in client.dataset(run["defaultDatasetId"]).iterate_items():
+        # Look across all possible text fields used in EU reporting
+        raw_text = item.get("primaryText") or item.get("title") or item.get("description") or item.get("caption")
+        
         ads.append({
             "Platform": "Meta (FB/IG)",
-            "Ad Start Date": str(item.get("startDate") or "Unknown")[:10],
+            "Ad Start Date": parse_eu_date(item.get("startDate") or item.get("creationDate")),
             "Format": "Image/Video", 
             "Status": "Active" if item.get("isActive") else "Inactive",
-            "Ad Copy Snippet": str(item.get("primaryText", "No text provided"))[:150] + "...",
+            "Ad Copy Snippet": str(raw_text)[:150] + "..." if raw_text else "Visual Ad (No Text Captions)",
         })
     return ads
 
-
-def get_google_ads(domain, api_key):
-    if not domain or api_key == "YOUR_SERPAPI_KEY_HERE": 
+def get_google_ads(url, api_key):
+    if not url: return []
+    
+    # Regex to pull the unique 'AR...' Advertiser ID out of the link you pasted
+    advertiser_id_match = re.search(lambda x: r"advertiser/(AR\d+)", url) # Handles AR numbers
+    if not advertiser_id_match:
+        # Fallback if it's just a number
+        advertiser_id_match = re.search(r"advertiser/(\d+)", url)
+        
+    if not advertiser_id_match:
+        st.error("Could not find a valid Google Advertiser ID in your link. Make sure it contains '/advertiser/AR...'")
         return []
         
-    # Calls the SerpApi endpoint
-    url = f"https://serpapi.com/search.json?engine=google_ads_transparency_center&text={domain}&api_key={api_key}"
-    response = requests.get(url).json()
+    advertiser_id = advertiser_id_match.group(1)
+    
+    # Call SerpApi using the exact Advertiser ID and specifying the EU region parameter
+    api_url = f"https://serpapi.com/search.json?engine=google_ads_transparency_center&advertiser_id={advertiser_id}&region=HU&api_key={api_key}"
+    response = requests.get(api_url).json()
     
     ads = []
     if "ad_creatives" in response:
         for ad in response["ad_creatives"]:
+            # Pull text from Google's various text objects
+            raw_text = ad.get("snippet") or ad.get("title") or ad.get("body")
             ads.append({
                 "Platform": "Google Ads",
-                "Ad Start Date": ad.get("last_shown", "Unknown"),
+                "Ad Start Date": parse_eu_date(ad.get("last_shown") or ad.get("first_shown")),
                 "Format": ad.get("format", "Unknown").title(),
-                "Status": "Active", 
-                "Ad Copy Snippet": "Google format (Check raw data for link)" if ad.get("format") != "text" else "Text Ad",
+                "Status": "Active" if ad.get("is_active", True) else "Inactive", 
+                "Ad Copy Snippet": str(raw_text)[:150] + "..." if raw_text else "Display/Video Creative",
             })
     return ads
 
-
 if submit_button:
-    if not meta_url and not google_domain:
-        st.warning("⚠️ Please enter at least one URL or Domain to begin.")
-    elif APIFY_API_TOKEN == "YOUR_APIFY_TOKEN_HERE" or SERPAPI_API_KEY == "YOUR_SERPAPI_KEY_HERE":
-        st.error("🛑 You forgot to add your API keys at the top of the code!")
-    else:
-        with st.spinner("Scraping live data from Meta and Google... (This can take 1-2 minutes)"):
+    with st.spinner("Accessing EU Transparency Archives..."):
+        meta_data = get_meta_ads(meta_url, APIFY_API_TOKEN)
+        google_data = get_google_ads(google_url, SERPAPI_API_KEY)
+        
+        df = pd.DataFrame(meta_data + google_data)
+        
+        if df.empty:
+            st.warning("No data found. Ensure your links are valid EU transparency links.")
+        else:
+            st.success("✅ EU Historical Archives Successfully Processed!")
             
-            # 1. Pull data from both APIs
-            meta_data = get_meta_ads(meta_url, APIFY_API_TOKEN)
-            google_data = get_google_ads(google_domain, SERPAPI_API_KEY)
+            # --- TOP METRICS ---
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Ads Analyzed", len(df))
+            col2.metric("Meta Ads Found", len(df[df["Platform"] == "Meta (FB/IG)"]))
+            col3.metric("Google Ads Found", len(df[df["Platform"] == "Google Ads"]))
             
-            # 2. Combine into one Pandas DataFrame
-            combined_data = meta_data + google_data
-            df = pd.DataFrame(combined_data)
+            st.markdown("---")
             
-            if df.empty:
-                st.warning("No ads found. Check your URLs or ensure the competitor is currently running ads.")
-            else:
-                st.success("✅ Live Data successfully pulled and cleaned!")
-                st.markdown("---")
+            # --- HISTORICAL TIMELINE CHART ---
+            timeline_df = df[df["Ad Start Date"] != "Unknown"].copy()
+            if not timeline_df.empty:
+                # Group dates into simple Month format (YYYY-MM)
+                timeline_df['Month'] = pd.to_datetime(timeline_df['Ad Start Date']).dt.to_period('M').astype(str)
+                # Filter to only look at the most recent months
+                timeline_counts = timeline_df.groupby(['Month', 'Platform']).size().reset_index(name='Ad Count')
                 
-                # --- TOP METRICS ---
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Total Ads Found", len(df))
-                col2.metric("Active Meta Ads", len(df[(df["Platform"] == "Meta (FB/IG)") & (df["Status"] == "Active")]))
-                col3.metric("Google Ads Logged", len(df[(df["Platform"] == "Google Ads")]))
-                col4.metric("Dominant Format", df["Format"].mode()[0])
-                
-                st.markdown("---")
-                
-                # --- CHARTS (Plotly) ---
-                st.subheader("📈 Competitor Strategy Visualized")
-                chart_col1, chart_col2 = st.columns(2)
-                
-                with chart_col1:
-                    fig_platform = px.pie(df, names="Platform", title="Ad Volume by Platform", hole=0.4)
-                    st.plotly_chart(fig_platform, use_container_width=True)
-                    
-                with chart_col2:
-                    fig_format = px.histogram(df, x="Format", color="Platform", title="Creative Format Breakdown", barmode="group")
-                    st.plotly_chart(fig_format, use_container_width=True)
-
-                # --- RAW DATA TABLE ---
-                st.markdown("---")
-                st.subheader("📂 Raw Ad Data")
-                st.dataframe(df, use_container_width=True)
+                fig_time = px.bar(timeline_counts, x="Month", y="Ad Count", color="Platform", barmode="group",
+                                  title="Ad Volume History Over Time (Past Months)")
+                st.plotly_chart(fig_time, use_container_width=True)
+            
+            # --- DATA TABLE ---
+            st.subheader("📂 Complete Historical Log")
+            st.dataframe(df, use_container_width=True)
