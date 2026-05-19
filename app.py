@@ -44,7 +44,7 @@ def get_meta_ads(url, token):
     for item in client.dataset(run["defaultDatasetId"]).iterate_items():
         ads.append({
             "Platform": "Meta (FB/IG)",
-            "Ad Start Date": item.get("startDate", "Unknown")[:10],
+            "Ad Start Date": str(item.get("startDate") or "Unknown")[:10],
             "Format": "Image/Video", 
             "Status": "Active" if item.get("isActive") else "Inactive",
             "Ad Copy Snippet": str(item.get("primaryText", "No text provided"))[:150] + "...",
