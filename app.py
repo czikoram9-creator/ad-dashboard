@@ -64,7 +64,7 @@ def get_google_ads(url, api_key):
     if not url: return []
     
     # Regex to pull the unique 'AR...' Advertiser ID out of the link you pasted
-    advertiser_id_match = re.search(lambda x: r"advertiser/(AR\d+)", url) # Handles AR numbers
+    advertiser_id_match = re.search(r"advertiser/(AR\d+)", url) # Handles AR numbers
     if not advertiser_id_match:
         # Fallback if it's just a number
         advertiser_id_match = re.search(r"advertiser/(\d+)", url)
